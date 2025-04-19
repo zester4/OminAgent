@@ -1,0 +1,523 @@
+# -*- coding: utf-8 -*-
+"""
+Gemini Chat Agent v9.8: Increased Context, Clean Console Output
+
+Core Features:
+- Model: gemini/gemini-2.0-flash
+- Tools: Weather, Search, Firecrawl, GitHub, CodeExec(Ack), DateTime, VectorSearch
+- INCREASED: Context window limit for memory management.
+- CLEANED: Console shows only You:/OmniBot: interaction (and critical errors).
+- Vector database for semantic memory (in-memory).
+- Conversation memory management.
+- Streaming Responses.
+- Structured Logging (Detailed logs go to file only).
+- File Handling.
+"""
+
+# Install necessary libraries
+!pip install litellm python-dotenv requests duckduckgo-search firecrawl-py sentence-transformers numpy matplotlib PyGithub > /dev/null
+print("Libraries installed.") # Keep this initial confirmation
+
+# Imports
+import litellm, os, base64, json, mimetypes, getpass, requests, traceback, logging, numpy as np, time, io, sys
+from pathlib import Path
+from duckduckgo_search import DDGS
+from firecrawl import FirecrawlApp
+from datetime import datetime
+from collections import defaultdict
+from contextlib import redirect_stdout, redirect_stderr
+import matplotlib.pyplot as plt
+from github import Github, GithubException
+import tempfile
+import shutil
+import subprocess
+
+
+# --- Setup Logging (Clean Console) ---
+def setup_logging():
+    """Configure structured logging with different levels for file and console."""
+    for handler in logging.root.handlers[:]: logging.root.removeHandler(handler)
+    log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger("gemini_agent")
+    logger.setLevel(logging.INFO) # Process INFO and higher internally
+    # File Handler - Logs INFO and higher to file
+    file_handler = logging.FileHandler("gemini_agent_v9.8.log") # Updated log filename
+    file_handler.setFormatter(log_formatter); file_handler.setLevel(logging.INFO)
+    # Stream Handler (Console) - Logs WARNING and higher to console
+    stream_handler = logging.StreamHandler(); stream_handler.setFormatter(log_formatter)
+    stream_handler.setLevel(logging.WARNING) # Console only shows WARNING+
+    logger.addHandler(file_handler); logger.addHandler(stream_handler)
+    logger.propagate = False
+    return logger
+logger = setup_logging()
+logger.info("Starting Gemini Chat Agent v9.8 (Increased Context, Clean Console)") # To file only
+
+# --- Custom Exceptions ---
+class AgentException(Exception): pass
+class ToolExecutionError(AgentException): pass
+class APIKeyError(AgentException): pass
+class VectorDBError(AgentException): pass
+class GitHubToolError(ToolExecutionError): pass
+
+# --- API Key Setup ---
+# (API Key logic unchanged - uses getpass for console input if needed)
+logger.info("Setting up API Keys...") # To file only
+def get_api_key(env_var, prompt_text):
+    key = os.environ.get(env_var)
+    log_level = logging.INFO if key else logging.WARNING
+    log_message = f"Using {env_var} from env." if key else f"{env_var} not found in env."
+    logger.log(log_level, log_message) # Goes to file or console based on level
+    if not key: print(prompt_text); key = getpass.getpass(); os.environ[env_var] = key # Console prompt
+    if not key: logger.warning(f"{env_var} not provided.") # Console WARN if still missing
+    return key
+try:
+    gemini_api_key = get_api_key("GEMINI_API_KEY", "Enter Gemini API Key:")
+    if not gemini_api_key: raise APIKeyError("Gemini API Key missing")
+except APIKeyError as e: logger.error(e); raise
+except Exception as e: logger.error(f"Gemini key error: {e}"); raise
+openweathermap_api_key = get_api_key("OPENWEATHERMAP_API_KEY", "\nEnter OpenWeatherMap API Key:")
+firecrawl_api_key = get_api_key("FIRECRAWL_API_KEY", "\nEnter Firecrawl API Key:")
+github_api_key = get_api_key("GITHUB_API_KEY", "\nEnter GitHub API Key (PAT with repo scope):")
+logger.info("API Keys configured.") # To file only
+
+
+# --- Memory Management ---
+# (Unchanged - uses logger internally, warnings might show on console)
+class ConversationMemory:
+    CHARS_PER_TOKEN_ESTIMATE = 4
+    def __init__(self, max_tokens=1_000_000, system_message=None): # <<< INCREASED MAX_TOKENS
+        self.messages = []; self.system_message = system_message
+        if system_message: self.messages.append(system_message); self.token_count = self._estimate_tokens(system_message)
+        else: self.token_count = 0
+        self.max_tokens = max_tokens; logger.info(f"Memory init: max_tokens={max_tokens}") # File only
+    def _estimate_tokens(self, message): return len(json.dumps(message)) // self.CHARS_PER_TOKEN_ESTIMATE
+    def add_message(self, message):
+        est_tokens = self._estimate_tokens(message)
+        while self.token_count + est_tokens > self.max_tokens and len(self.messages) > (1 if self.system_message else 0): self._prune_history()
+        if self.token_count + est_tokens > self.max_tokens: logger.warning(f"Msg ({est_tokens} tk) too large. Skipping."); return False # Console WARN
+        self.messages.append(message); self.token_count += est_tokens; logger.debug(f"Msg added. Role: {message.get('role')}, Tokens: {self.token_count}"); return True # File only
+    def _prune_history(self):
+        if len(self.messages) <= (1 if self.system_message else 0): logger.warning("Cannot prune."); return # Console WARN
+        idx = 1 if self.system_message else 0
+        if idx < len(self.messages):
+            removed = self.messages.pop(idx); removed_tk = self._estimate_tokens(removed)
+            self.token_count -= removed_tk; logger.info(f"Pruned msg (Role: {removed.get('role')}). Tokens: {self.token_count}") # File only
+        else: logger.warning("Pruning failed: No non-system msgs.") # Console WARN
+    def get_messages(self): return self.messages
+    def get_last_user_message_content(self):
+        for msg in reversed(self.messages):
+            if msg.get("role") == "user": return msg.get("content")
+        return None
+
+# --- Vector Database for Semantic Memory ---
+# (Unchanged - uses logger internally, errors/warnings might show on console)
+class VectorDB:
+    def __init__(self):
+        self.model = None; self.texts = []; self.metadata = []; self.embeddings = None; self.initialized = False
+        try: from sentence_transformers import SentenceTransformer; self.model = SentenceTransformer('all-MiniLM-L6-v2'); self.initialized = True; logger.info("Vector DB init success")
+        except ImportError: logger.error("sentence-transformers not installed. VDB disabled.")
+        except Exception as e: logger.error(f"SentenceTransformer load failed: {e}. VDB disabled.")
+    def add(self, text, metadata=None):
+        if not self.is_ready(): logger.warning("VDB add skipped: Not initialized."); return False
+        if not text or not isinstance(text, str): logger.warning(f"VDB add skipped: Invalid text."); return False
+        try:
+            embedding = self.model.encode(text)
+            if self.embeddings is None: self.embeddings = np.array([embedding])
+            else:
+                if not isinstance(self.embeddings, np.ndarray): logger.error("VDB state error."); return False
+                self.embeddings = np.vstack([self.embeddings, embedding])
+            self.texts.append(text); self.metadata.append(metadata or {})
+            logger.debug(f"Added VDB entry: {text[:50]}... Shape: {self.embeddings.shape if self.embeddings is not None else 'None'}")
+            return True
+        except Exception as e: logger.error(f"VDB add error: {e}", exc_info=True); return False
+    def search(self, query, top_k=3):
+        if not self.is_ready(): logger.error("VDB search fail: Not initialized."); raise VectorDBError("VDB not initialized")
+        if self.embeddings is None or self.embeddings.size == 0: logger.warning("VDB empty."); return []
+        try:
+            q_emb = self.model.encode(query); embs_2d = self.embeddings if self.embeddings.ndim == 2 else self.embeddings.reshape(-1, self.model.get_sentence_embedding_dimension())
+            norms_e = np.linalg.norm(embs_2d, axis=1); norm_q = np.linalg.norm(q_emb)
+            if norm_q == 0: logger.warning("Query norm zero."); return []
+            valid_idx = np.where(norms_e > 1e-8)[0]
+            if len(valid_idx) == 0: logger.warning("No valid embeddings."); return []
+            valid_embs = embs_2d[valid_idx]; valid_norms = norms_e[valid_idx]
+            sims = np.dot(valid_embs, q_emb) / (valid_norms * norm_q)
+            count = min(top_k, len(sims));
+            if count <= 0: return []
+            rel_top_idx = np.argsort(sims)[::-1][:count]; orig_top_idx = valid_idx[rel_top_idx]
+            results = []
+            for i in orig_top_idx:
+                 if i < len(self.texts): results.append({ "text": self.texts[i], "similarity": float(sims[rel_top_idx[np.where(orig_top_idx == i)[0][0]]]), "metadata": self.metadata[i] })
+                 else: logger.warning(f"Search index {i} out of bounds.")
+            logger.info(f"VDB search '{query[:30]}...' returned {len(results)}.")
+            return results
+        except Exception as e: logger.error(f"VDB search error: {e}", exc_info=True); raise VectorDBError(f"VDB search failed: {e}")
+    def is_ready(self): return self.initialized and self.model is not None
+vector_db = VectorDB()
+
+# --- Tool Implementation (Object-Oriented) ---
+# (Base Tool class and specific tool implementations unchanged)
+class Tool:
+    def __init__(self, name, description, parameters=None, required=None):
+        self.name = name; self.description = description
+        if parameters and not isinstance(parameters, dict): raise ValueError("Params must be dict.")
+        self.parameters = parameters or {"type": "object", "properties": {}}
+        if required and not isinstance(required, list): raise ValueError("Required must be list.")
+        self.required = required or []
+        if self.required: self.parameters["required"] = self.required
+    def get_schema(self): return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": self.parameters}}
+    def validate_args(self, args):
+        if not isinstance(args, dict): raise ToolExecutionError("Args must be dict.")
+        missing = [p for p in self.required if p not in args or args[p] is None]
+        if missing: raise ToolExecutionError(f"Missing required: {', '.join(missing)}")
+        return True
+    def execute(self, **kwargs): raise NotImplementedError("Subclass must implement")
+
+class WeatherTool(Tool):
+    def __init__(self): super().__init__(name="get_current_weather", description="Retrieves real-time weather conditions for a specific city.", parameters={"type": "object", "properties": { "location": {"type": "string", "description": "City name."}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temp unit."}}}, required=["location"])
+    def execute(self, **kwargs):
+        self.validate_args(kwargs); l = kwargs.get("location"); u = kwargs.get("unit", "celsius")
+        if not openweathermap_api_key: raise ToolExecutionError("Weather key missing.")
+        url="http://api.openweathermap.org/data/2.5/weather";unts="metric" if u=="celsius" else "imperial";sym="°C" if u=="celsius" else "°F";p={"q":l,"appid":openweathermap_api_key,"units":unts}
+        retries=3;delay=1
+        for attempt in range(retries):
+            try:
+                r=requests.get(url, params=p, timeout=10);r.raise_for_status();data=r.json()
+                if data.get("cod") != 200: raise ToolExecutionError(f"Weather API Error: {data.get('message', 'Unknown')}")
+                m=data.get("main",{});w=data.get("weather",[{}]);d=w[0].get('description',"");t=m.get('temp');f=m.get('feels_like');h=m.get('humidity')
+                res=f"Weather in {data.get('name', l)}: {d}, Temp: {t}{sym} (feels like {f}{sym}), Humidity: {h}%"
+                if vector_db.is_ready(): vector_db.add(f"Weather: {l}({u}): {res}", {"type": "weather", "location": l, "time": datetime.now().isoformat()})
+                return res
+            except requests.exceptions.Timeout: logger.warning(f"Weather timeout {l} (try {attempt+1}). Retrying...")
+            except requests.exceptions.HTTPError as e:
+                 if e.response.status_code == 404: raise ToolExecutionError(f"City '{l}' not found.")
+                 elif e.response.status_code == 401: raise ToolExecutionError("Invalid Weather API key.")
+                 else: logger.error(f"Weather HTTP error: {e}"); raise ToolExecutionError(f"HTTP error {e.response.status_code}")
+            except requests.exceptions.RequestException as e: logger.error(f"Weather network error: {e}"); raise ToolExecutionError(f"Network error: {e}")
+            except Exception as e: logger.error(f"Unexpected weather error: {e}"); raise ToolExecutionError(f"Unexpected error: {e}")
+            time.sleep(delay); delay *= 2
+        raise ToolExecutionError(f"Weather fetch failed after {retries} attempts.")
+class SearchTool(Tool):
+    def __init__(self): super().__init__(name="perform_web_search", description="General web search for facts/current info.", parameters={"type": "object", "properties": {"query": {"type": "string", "description": "Search query."}}}, required=["query"])
+    def execute(self, **kwargs):
+        self.validate_args(kwargs); q = kwargs.get("query"); logger.info(f"Searching: {q}")
+        try:
+            with DDGS() as ddgs: results = list(ddgs.text(q, max_results=5))
+            if not results: return f"No results for '{q}'."
+            fmt = []
+            for r in results:
+                txt = f"Title: {r.get('title','N/A')}\nSnippet: {r.get('body','N/A')}\nURL: {r.get('href','N/A')}"
+                fmt.append(txt)
+                if vector_db.is_ready(): vector_db.add(f"Search snippet '{q}': {r.get('title', '')} - {r.get('body', '')}", {"type": "search_result", "url": r.get('href'), "query": q, "time": datetime.now().isoformat()})
+            return f"Search results for '{q}':\n\n" + "\n\n---\n\n".join(fmt)
+        except Exception as e: logger.error(f"Search error: {e}"); raise ToolExecutionError(f"Search failed: {e}")
+class WebScraperTool(Tool):
+    def __init__(self): super().__init__(name="scrape_website_for_llm", description="Fetches main content of a specific URL as Markdown.", parameters={"type": "object", "properties": {"url": {"type": "string", "description": "URL to scrape."}}}, required=["url"])
+    def execute(self, **kwargs):
+        self.validate_args(kwargs); url = kwargs.get("url"); logger.info(f"Scraping URL: {url}")
+        if not firecrawl_api_key: raise ToolExecutionError("Firecrawl API key missing.")
+        try:
+            app = FirecrawlApp(api_key=firecrawl_api_key)
+            # Using user-specified call structure
+            scraped_data = app.scrape_url(url=url, params={'formats': ['markdown']})
+            markdown_content = None
+            if isinstance(scraped_data, dict): markdown_content = scraped_data.get('markdown')
+            elif isinstance(scraped_data, str): markdown_content = scraped_data
+            if markdown_content:
+                logger.info(f"Scrape success: {url}")
+                if vector_db.is_ready():
+                    chunks = self._chunk_content(markdown_content); logger.info(f"Storing {len(chunks)} chunks from {url} in VDB.")
+                    for i, chunk in enumerate(chunks): vector_db.add(chunk, {"type": "web_content", "url": url, "chunk": i+1, "total_chunks": len(chunks), "time": datetime.now().isoformat()})
+                return markdown_content
+            else:
+                error_msg = scraped_data.get('error', 'Markdown content not found or scrape failed.') if isinstance(scraped_data, dict) else "Scrape returned empty/unexpected data."
+                logger.warning(f"Scrape failed for {url}: {error_msg}"); raise ToolExecutionError(f"Scraping failed: {error_msg}")
+        except requests.exceptions.HTTPError as e:
+             logger.error(f"Scrape HTTP error: {e}"); msg = f"Status {e.response.status_code}"
+             try: details = e.response.json(); msg += f". Details: {details.get('error', details.get('message', json.dumps(details)))}"
+             except json.JSONDecodeError: msg += f". Response: {e.response.text}"
+             raise ToolExecutionError(f"Firecrawl API request failed. {msg}")
+        except Exception as e: logger.error(f"Scrape exception: {e}"); traceback.print_exc(); raise ToolExecutionError(f"Unexpected scrape error: {e}")
+    def _chunk_content(self, content, max_chars=1500, overlap=100):
+        if not isinstance(content, str) or not content: return []
+        if len(content) <= max_chars: return [content]
+        chunks = []; start = 0
+        while start < len(content):
+            end = min(start + max_chars, len(content)); chunks.append(content[start:end])
+            start += max_chars - overlap;
+            if start >= len(content): break; start = max(0, start)
+        return [c for c in chunks if c]
+class CodeExecutionTool(Tool): # Acknowledgment only version
+    def __init__(self): super().__init__(name="code_execution", description="Acknowledges Python code requests (execution by Gemini).", parameters={"type": "object", "properties": {"code": {"type": "string", "description": "Python code."}}}, required=["code"])
+    def execute(self, **kwargs):
+        self.validate_args(kwargs); code = kwargs.get("code"); logger.info(f"Ack code execution: {code[:100]}...")
+        return "Code execution request acknowledged. Output will follow if executed by the AI."
+class DateTimeTool(Tool):
+    def __init__(self): super().__init__( name="get_current_datetime", description="Returns current date and time.", parameters={"type": "object", "properties": {}})
+    def execute(self, **kwargs): now = datetime.now(); fmt = now.strftime("%A, %d %B %Y, %H:%M:%S %Z"); return f"Current date and time: {fmt}"
+class VectorSearchTool(Tool):
+    def __init__(self): super().__init__(name="semantic_memory_search", description="Searches agent's long-term memory (VDB) for relevant info.", parameters={"type": "object", "properties": { "query": {"type": "string", "description": "Search query for memory."}, "results_count": {"type": "integer", "description": "Num results (default: 3)."}}}, required=["query"])
+    def execute(self, **kwargs):
+        self.validate_args(kwargs); q = kwargs.get("query"); c = kwargs.get("results_count", 3)
+        if not vector_db or not vector_db.is_ready(): raise ToolExecutionError("Vector DB unavailable.")
+        try:
+            res = vector_db.search(q, top_k=c)
+            if not res: return "No relevant info found in memory."
+            fmt = [f"Memory {i+1} (Relevance: {r['similarity']:.2f}):\nMetadata: {r.get('metadata', {})}\nContent: {r['text']}" for i, r in enumerate(res)]
+            return "Semantic Memory Search Results:\n\n" + "\n\n---\n\n".join(fmt)
+        except VectorDBError as e: logger.error(f"VDB search failed: {e}"); raise ToolExecutionError(f"Error searching memory: {e}")
+        except Exception as e: logger.error(f"Unexpected VDB search error: {e}"); traceback.print_exc(); raise ToolExecutionError(f"Unexpected error searching memory: {e}")
+class GitHubTool(Tool): # As provided
+    def __init__(self): super().__init__(name="github_operations", description="Manage GitHub repositories, files and operations.", parameters={ "type": "object", "properties": { "operation": { "type": "string", "enum": ["list_repos", "create_repo", "read_file", "write_file", "list_files", "clone_repo"], "description": "GitHub operation."}, "repo_name": { "type": "string", "description": "[owner/]repo name." }, "file_path": { "type": "string", "description": "Path to file." }, "file_content": { "type": "string", "description": "Content to write." }, "description": { "type": "string", "description": "Repo description." }, "private": { "type": "boolean", "description": "Make repo private (default: false)." }, "branch": { "type": "string", "description": "Branch name (default: main/master)." }, "commit_message": { "type": "string", "description": "Commit message." }, "path": { "type": "string", "description": "Directory path." } }, "required": ["operation"] }, required=["operation"] )
+    def _get_repo(self, github, repo_name):
+        if not repo_name: raise GitHubToolError("'repo_name' required.")
+        try: return github.get_repo(repo_name)
+        except GithubException as e:
+            if e.status == 404: raise GitHubToolError(f"Repo '{repo_name}' not found/accessible.")
+            else: raise GitHubToolError(f"Error accessing repo '{repo_name}': {e.status} - {e.data.get('message', str(e))}")
+        except Exception as e: raise GitHubToolError(f"Error getting repo '{repo_name}': {str(e)}")
+    def execute(self, **kwargs):
+        self.validate_args(kwargs); operation = kwargs.get("operation"); logger.info(f"Executing GitHub op: {operation}")
+        if not github_api_key: raise GitHubToolError("GitHub API key missing.")
+        try:
+            g = Github(github_api_key); user = g.get_user()
+            if operation == "list_repos":
+                repos = list(user.get_repos(affiliation='owner'));
+                if not repos: return "No owned repositories found."
+                repo_list = [f"- {r.full_name} ({'private' if r.private else 'public'})" for i, r in enumerate(repos[:30])]
+                return f"Your repositories ({min(len(repos), 30)} shown):\n" + "\n".join(repo_list)
+            elif operation == "create_repo":
+                repo_name = kwargs.get("repo_name")
+                if not repo_name or "/" in repo_name: raise GitHubToolError("Valid repo name (no owner) required.")
+                desc = kwargs.get("description", ""); priv = kwargs.get("private", False); logger.info(f"Creating repo: {repo_name}")
+                repo = user.create_repo(name=repo_name, description=desc, private=priv, auto_init=True)
+                if vector_db.is_ready(): vector_db.add(f"Created GitHub repo: {repo.full_name}", {"type": "github_action", "action": "create_repo", "repo": repo.full_name, "time": datetime.now().isoformat()})
+                return f"Repository '{repo.full_name}' created: {repo.html_url}"
+            repo_name = kwargs.get("repo_name"); repo = self._get_repo(g, repo_name)
+            if operation == "read_file":
+                fp = kwargs.get("file_path"); br = kwargs.get("branch", repo.default_branch);
+                if not fp: raise GitHubToolError("'file_path' required.")
+                logger.info(f"Reading '{fp}' from '{repo.full_name}' branch '{br}'")
+                cf = repo.get_contents(fp, ref=br); content = base64.b64decode(cf.content).decode('utf-8')
+                return f"Content of '{fp}' in '{repo.full_name}':\n```\n{content}\n```"
+            elif operation == "write_file":
+                fp = kwargs.get("file_path"); fc = kwargs.get("file_content"); cm = kwargs.get("commit_message"); br = kwargs.get("branch", repo.default_branch)
+                if not fp or fc is None or not cm: raise GitHubToolError("file_path, file_content, commit_message required.")
+                logger.info(f"Writing '{fp}' in '{repo.full_name}' branch '{br}'")
+                try: contents = repo.get_contents(fp, ref=br); commit = repo.update_file(contents.path, cm, fc, contents.sha, branch=br); action = "updated"
+                except GithubException as e:
+                    if e.status == 404: commit = repo.create_file(fp, cm, fc, branch=br); action = "created"
+                    else: raise
+                if vector_db.is_ready(): vector_db.add(f"GitHub file {action}: {repo.full_name}/{fp}", {"type": "github_action", "action": "write_file", "repo": repo.full_name, "path": fp, "time": datetime.now().isoformat()})
+                return f"File '{fp}' {action} in '{repo.full_name}'. Commit: {commit['commit'].sha}"
+            elif operation == "list_files":
+                path = kwargs.get("path", ""); br = kwargs.get("branch", repo.default_branch); logger.info(f"Listing files in '{repo.full_name}/{path}' branch '{br}'")
+                contents = repo.get_contents(path, ref=br)
+                if not contents: return f"Directory '{path}' empty/not found."
+                file_list = [f"- {'[DIR] ' if item.type == 'dir' else ''}{item.path}" for item in contents]
+                return f"Files/Dirs in '{repo.full_name}/{path}':\n" + "\n".join(file_list)
+            elif operation == "clone_repo":
+                clone_dir = Path(tempfile.mkdtemp()); repo_url = repo.clone_url; logger.info(f"Cloning '{repo.full_name}' to {clone_dir}")
+                try:
+                    process = subprocess.run(['git', 'clone', repo_url, str(clone_dir)], capture_output=True, text=True, check=True)
+                    logger.info(f"Clone success: {process.stdout}"); result = f"Repo '{repo.full_name}' cloned temporarily to {clone_dir}."
+                    shutil.rmtree(clone_dir); return result
+                except subprocess.CalledProcessError as e: logger.error(f"Git clone failed: {e.stderr}"); shutil.rmtree(clone_dir); raise GitHubToolError(f"Git clone failed: {e.stderr}")
+                except FileNotFoundError: logger.error("Git command not found."); shutil.rmtree(clone_dir); raise GitHubToolError("Git command not found.")
+                except Exception as e: logger.error(f"Clone/cleanup error: {e}"); shutil.rmtree(clone_dir); raise GitHubToolError(f"Cloning error: {str(e)}")
+            else: raise GitHubToolError(f"Operation '{operation}' not recognized.")
+        except GithubException as e: logger.error(f"GitHub API error: {e}"); raise GitHubToolError(f"GitHub API error: {e.status} - {e.data.get('message', str(e))}")
+        except Exception as e: logger.error(f"GitHub tool error: {e}", exc_info=True); raise GitHubToolError(f"Unexpected GitHub tool error: {str(e)}")
+
+
+# --- Initialize Tools ---
+def initialize_tools():
+    logger.info("Initializing tools..."); tools_list = [ WeatherTool(), SearchTool(), WebScraperTool(), CodeExecutionTool(), DateTimeTool(), GitHubTool() ] # Added GitHubTool
+    if vector_db.is_ready(): tools_list.append(VectorSearchTool()); logger.info("Vector search tool initialized.")
+    else: logger.warning("Vector search tool NOT initialized.")
+    schemas = [t.get_schema() for t in tools_list]; tool_map = {t.name: t for t in tools_list}
+    logger.info(f"Tools initialized: {list(tool_map.keys())}")
+    return schemas, tool_map
+active_tool_schemas, tool_map = initialize_tools()
+
+# --- System Message Definition ---
+SYSTEM_MESSAGE = { "role": "system", "content": ("You are OmniBot. Use tools proactively. **Never** say you lack access; state you will use a tool. Use `code_execution` to acknowledge Python code requests (execution handled externally). Use `github_operations` for GitHub tasks. Use `semantic_memory_search` for past info if available.\n\n**Available Tools:**\n" + "".join([f"- `{tool.name}`: {tool.description}\n" for tool in tool_map.values()]) + "\nAnswer based on tool outputs.")}
+logger.info(f"System message generated. Approx tokens: {len(SYSTEM_MESSAGE['content']) // 4}") # File only
+
+
+# --- File Processing Helper ---
+# (Unchanged)
+def process_file_input(file_identifier):
+    logger.info(f"Processing file: {file_identifier}"); content_part = {"type": "file"}; file_data_dict = {}; mime_type = None
+    if file_identifier.startswith("http://") or file_identifier.startswith("https://"):
+        file_data_dict["file_id"] = file_identifier; mime_type, _ = mimetypes.guess_type(file_identifier)
+        if not mime_type:
+            try: r=requests.head(file_identifier, allow_redirects=True, timeout=7); r.raise_for_status(); ct=r.headers.get('Content-Type'); mime_type=ct.split(';')[0].strip() if ct else None
+            except requests.exceptions.RequestException as e: logger.warning(f" HEAD failed: {e}")
+        if mime_type: file_data_dict["format"] = mime_type; logger.info(f" URL MIME: {mime_type}")
+        else: logger.warning(" No MIME for URL.")
+    elif file_identifier.startswith("gs://"):
+        file_data_dict["file_id"] = file_identifier; mime_type, _ = mimetypes.guess_type(file_identifier)
+        if mime_type: file_data_dict["format"] = mime_type; logger.info(f" GCS MIME: {mime_type}")
+    else: # Local file
+        lp = Path(file_identifier);
+        if not lp.is_file(): logger.error(f"Local file not found: {lp}"); return None
+        try:
+            fb = lp.read_bytes(); ed = base64.b64encode(fb).decode("utf-8"); mime_type, _ = mimetypes.guess_type(lp)
+            if not mime_type: mime_type = "application/octet-stream"; logger.warning(f" Default MIME: {mime_type}")
+            else: logger.info(f" Local MIME: {mime_type}")
+            file_data_dict["file_data"] = f"data:{mime_type};base64,{ed}";
+            if vector_db.is_ready(): fn = lp.name; vector_db.add(f"User file: {fn} ({mime_type})", {"type": "file_provided", "source": "local", "filename": fn, "mime_type": mime_type, "time": datetime.now().isoformat()})
+        except Exception as e: logger.error(f"Read local file error {lp}: {e}"); traceback.print_exc(); return None
+    content_part["file"] = file_data_dict; return content_part
+
+# --- CORRECTED Tool Execution Wrapper ---
+def execute_tool_call(tool_call_data): # Accepts dictionary
+    """Wrapper for executing tool calls using dictionary input."""
+    function_name = tool_call_data.get('function', {}).get('name')
+    arguments_str = tool_call_data.get('function', {}).get('arguments')
+    if not function_name: error_msg = "Error: Tool call missing function name."; logger.error(error_msg); return error_msg
+    try:
+        function_args = json.loads(arguments_str) if arguments_str else {}
+        logger.info(f"Attempting execution: '{function_name}' args: {function_args}") # File only
+    except json.JSONDecodeError: error_msg = f"Error: Invalid JSON args for {function_name}"; logger.error(error_msg); return error_msg # Console ERROR
+    if function_name not in tool_map: error_msg = f"Error: Unknown function '{function_name}'"; logger.error(error_msg); return error_msg # Console ERROR
+    try:
+        tool = tool_map[function_name]; result = tool.execute(**function_args)
+        logger.info(f"Tool '{function_name}' executed successfully.") # File only
+        logger.debug(f"Tool '{function_name}' result snippet: {str(result)[:200]}...") # File only
+        return result
+    except ToolExecutionError as e: logger.error(f"Tool execution failed '{function_name}': {e}"); return f"Error executing tool {function_name}: {e}" # Console ERROR + return error msg
+    except Exception as e: logger.critical(f"Unexpected critical error executing tool '{function_name}'", exc_info=True); return f"Critical Error executing tool {function_name}." # Console CRITICAL + return error msg
+
+
+# --- CORRECTED Handle Streaming Response ---
+def handle_streaming_response(stream):
+    """Processes LiteLLM stream, prints content, and aggregates the full response."""
+    full_response_content = ""; tool_calls_agg = defaultdict(lambda: {"id": None, "name": None, "arguments": ""}); final_tool_calls_list = []; completed_tool_call_indices = set(); current_tool_call_index = -1
+
+    print("\nOmniBot: ", end="", flush=True) # Direct console output
+    try:
+        for chunk in stream:
+            # Process Content Delta
+            delta_content = chunk.choices[0].delta.content
+            if delta_content: print(delta_content, end="", flush=True); full_response_content += delta_content
+
+            # Process Tool Call Delta
+            delta_tool_calls = chunk.choices[0].delta.tool_calls
+            if delta_tool_calls:
+                for tc_chunk in delta_tool_calls:
+                    idx = tc_chunk.index
+                    # Aggregate parts
+                    if tc_chunk.id: tool_calls_agg[idx]["id"] = tc_chunk.id
+                    if tc_chunk.function and tc_chunk.function.name: tool_calls_agg[idx]["name"] = tc_chunk.function.name
+                    if tc_chunk.function and tc_chunk.function.arguments: tool_calls_agg[idx]["arguments"] += tc_chunk.function.arguments
+                    # Check for completion heuristic
+                    current_call = tool_calls_agg[idx]
+                    if current_call["id"] and current_call["name"] and idx not in completed_tool_call_indices:
+                         args_str = current_call["arguments"]; is_complete_json = False
+                         try: json.loads(args_str); is_complete_json = True
+                         except json.JSONDecodeError: pass
+                         if is_complete_json: # If args look complete, finalize
+                              logger.debug(f"Stream: Finalizing tool {idx}...") # File only
+                              final_tool_calls_list.append({"id": current_call["id"], "type": "function", "function": {"name": current_call["name"], "arguments": args_str}})
+                              completed_tool_call_indices.add(idx)
+
+    except Exception as e: logger.error(f"Stream error: {e}", exc_info=True); print(f"\n[Stream Error: {e}]") # Console ERROR
+    finally: print() # Ensure newline
+    # Construct final message dict
+    final_message_dict = {"role": "assistant", "content": full_response_content if full_response_content else None, "tool_calls": final_tool_calls_list if final_tool_calls_list else None}
+    return final_message_dict
+
+
+# --- Main Chat Loop ---
+def chat_agent():
+    model_name = "gemini/gemini-2.0-flash"
+    memory = ConversationMemory(system_message=SYSTEM_MESSAGE, max_tokens=1_000_000) # Using increased token limit
+
+    logger.info("\n--- OmniBot Initialized (v9.7 - Corrected Tool Call) ---") # File only
+    print(f"OmniBot v9.7 Initialized. Model: {model_name}. Type 'quit' to exit.") # Console output
+    print(f"Vector DB Status: {'Ready' if vector_db.is_ready() else 'Unavailable'}") # Console output
+    print("-" * 60 + "\n") # Console output
+
+    while True:
+        try:
+            user_input = input("You: ") # Console output
+            if user_input.lower() == "quit": logger.info("User quit."); break # File only
+
+            user_message_content = []
+            # File handling... (unchanged)
+            if user_input.lower().startswith("file:") and len(user_input.split(' ', 1)) > 1:
+                file_id = user_input.split(' ', 1)[1].strip()
+                if file_id:
+                    file_part = process_file_input(file_id)
+                    if not file_part: print("OmniBot: [Error processing file.]"); continue # Console output
+                    prompt = input("You (prompt for file): ") # Console output
+                    if prompt: user_message_content.extend([{"type": "text", "text": prompt}, file_part])
+                    else: print("OmniBot: [No prompt for file.]"); continue # Console output
+                else: print("OmniBot: [File command needs path/URL.]"); continue # Console output
+            else: user_message_content.append({"type": "text", "text": user_input})
+            if not user_message_content: continue
+
+            user_message = {"role": "user", "content": user_message_content}
+            if not memory.add_message(user_message): print("OmniBot: [Message too long.]"); continue # Console output
+
+            user_text = user_input
+            if isinstance(user_message_content, list):
+                for item in user_message_content:
+                    if item.get("type") == "text": user_text = item.get("text",""); break
+            if vector_db.is_ready(): vector_db.add(f"User said: {user_text}", {"type": "user_message", "time": datetime.now().isoformat()})
+
+            logger.info("OmniBot: Thinking...") # File only
+
+            current_messages = memory.get_messages()
+            response_stream = litellm.completion(model=model_name, messages=current_messages, tools=active_tool_schemas, tool_choice="auto", stream=True)
+
+            response_message_dict = handle_streaming_response(response_stream) # Prints to console
+            memory.add_message(response_message_dict)
+
+            if response_message_dict.get("tool_calls"):
+                logger.info(f"LLM requested {len(response_message_dict['tool_calls'])} tool(s)...") # File only
+
+                tool_results = []
+                for tc_data in response_message_dict["tool_calls"]:
+                    # --- Use CORRECTED execute_tool_call which accepts dict ---
+                    result_content = execute_tool_call(tc_data)
+                    # --- End Correction ---
+                    if isinstance(result_content, str) and result_content.lower().startswith("error"): logger.warning(f"Tool '{tc_data.get('function', {}).get('name')}' failed. Error: {result_content}") # Console WARN
+                    result_msg = {"role": "tool", "tool_call_id": tc_data.get('id'), "content": str(result_content)}
+                    tool_results.append(result_msg)
+                    memory.add_message(result_msg) # Add result to memory
+
+                logger.info("OmniBot: Processing tool results...") # File only
+                messages_with_results = memory.get_messages()
+                final_stream = litellm.completion(model=model_name, messages=messages_with_results, stream=True)
+                final_response_dict = handle_streaming_response(final_stream) # Prints to console
+                memory.add_message(final_response_dict)
+
+                final_content = final_response_dict.get("content", "")
+                if final_content: logger.info(f"OmniBot final response (after tools): {final_content}") # File only
+                elif response_message_dict.get("tool_calls"): logger.info("OmniBot final response after tool use had no text.") # File only
+                else: logger.warning("OmniBot final response was empty.") # Console WARN
+                if final_content and vector_db.is_ready(): vector_db.add(f"OmniBot response: {final_content}", {"type": "assistant_response", "after_tool_use": True, "time": datetime.now().isoformat()})
+
+            elif response_message_dict.get("content"):
+                assistant_content = response_message_dict["content"]
+                logger.info(f"OmniBot response: {assistant_content}") # File only
+                if vector_db.is_ready(): vector_db.add(f"OmniBot response: {assistant_content}", {"type": "assistant_response", "after_tool_use": False, "time": datetime.now().isoformat()})
+            else: logger.warning("OmniBot received empty initial response.") # Console WARN
+
+        # --- Error Handling ---
+        except litellm.exceptions.APIError as e:
+             logger.error(f"LiteLLM API Error: {e}", exc_info=True); print(f"\n!!! OmniBot Error: API Failure {e.status_code if hasattr(e, 'status_code') else ''} !!!") # Console ERROR
+             try: logger.error(f"API Error Body: {json.dumps(e.response.json(), indent=2)}") # Console ERROR
+             except: logger.error(f"Raw API Error: {e.response.text if hasattr(e, 'response') else 'N/A'}") # Console ERROR
+        except AgentException as e: logger.error(f"Agent Error: {e}", exc_info=True); print(f"\n!!! OmniBot Error: {e} !!!") # Console ERROR
+        except KeyboardInterrupt: logger.info("User interrupted."); print("\nOmniBot: Exiting..."); break # File info, Console output
+        except Exception as e: logger.critical(f"Critical error in main loop!", exc_info=True); print(f"\n!!! OmniBot Critical Error: {e} !!!"); break # Console CRITICAL
+
+
+# --- Start the Agent ---
+if __name__ == "__main__":
+    try: chat_agent()
+    except APIKeyError: print("Execution stopped: Missing critical API key.") # Console output
+    except Exception as main_e: logger.critical(f"Critical agent startup error: {main_e}", exc_info=True); print(f"\n!!! Critical startup error: {main_e} !!!") # Console CRITICAL
