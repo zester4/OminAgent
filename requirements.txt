@@ -1,0 +1,9 @@
+litellm
+python-dotenv
+requests
+duckduckgo-search
+firecrawl-py
+sentence-transformers
+numpy
+matplotlib
+PyGithub
