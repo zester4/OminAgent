@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OmniAgent v9.8</title>
+    <style>
+        /* CSS unchanged from your provided style - keeping it clean */
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500&display=swap');
+        :root { --bg-color: #0a0a14; --panel-color: rgba(30, 30, 50, 0.6); --accent-color: #4d8efd; --accent-glow: rgba(77, 142, 253, 0.2); --text-primary: #e4e4f1; --text-secondary: #9b9bba; --border-radius: 12px; --transition: all 0.3s ease; }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Space Grotesk', sans-serif; }
+        body { background: var(--bg-color); color: var(--text-primary); min-height: 100vh; display: flex; justify-content: center; align-items: center; background-image: radial-gradient(circle at 20% 30%, rgba(77, 142, 253, 0.05) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(97, 225, 232, 0.07) 0%, transparent 50%); padding: 10px; }
+        .chat-container { width: 100%; max-width: 1000px; height: 90vh; background: var(--panel-color); backdrop-filter: blur(10px); border-radius: var(--border-radius); overflow: hidden; display: flex; flex-direction: column; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4); }
+        .chat-header { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: rgba(30, 30, 50, 0.9); border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+        .header-title { display: flex; align-items: center; gap: 10px; }
+        .header-title h1 { font-size: 16px; font-weight: 500; }
+        .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+        .status-indicator { width: 8px; height: 8px; background: #4cda7a; border-radius: 50%; box-shadow: 0 0 8px rgba(76, 218, 122, 0.5); }
+        .status-indicator.thinking { background: #f5a623; box-shadow: 0 0 8px rgba(245, 166, 35, 0.5); animation: pulse 1.5s infinite; }
+        .status-indicator.error { background: #e5484d; box-shadow: 0 0 8px rgba(229, 72, 77, 0.5); }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        .header-actions button { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 5px; transition: var(--transition); }
+        .header-actions button:hover { color: var(--text-primary); }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 15px; scrollbar-width: thin; scrollbar-color: var(--accent-color) transparent; }
+        .chat-messages::-webkit-scrollbar { width: 4px; }
+        .chat-messages::-webkit-scrollbar-thumb { background-color: var(--accent-color); border-radius: 10px; }
+        .message { max-width: 85%; padding: 10px 14px; border-radius: var(--border-radius); font-size: 13px; line-height: 1.6; position: relative; word-wrap: break-word; animation: messageAppear 0.3s ease forwards; }
+        @keyframes messageAppear { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .message.received { align-self: flex-start; background: rgba(55, 55, 75, 0.7); border-top-left-radius: 4px; }
+        .message.sent { align-self: flex-end; background: var(--accent-color); color: #fff; border-top-right-radius: 4px; box-shadow: 0 2px 8px var(--accent-glow); }
+        .message-time { display: block; font-size: 10px; color: var(--text-secondary); opacity: 0.7; text-align: right; margin-top: 4px; }
+        .message.received .message-time { text-align: left; }
+        .message-typing { display: flex; gap: 5px; padding: 10px; align-items: center; height: 30px; margin-left: 5px; /* Align with received messages */ }
+        .typing-dot { width: 6px; height: 6px; background: var(--text-secondary); border-radius: 50%; animation: typingAnimation 1.2s infinite ease-in-out; }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typingAnimation { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+        .chat-input-container { padding: 15px; border-top: 1px solid rgba(255, 255, 255, 0.05); background: rgba(30, 30, 50, 0.9); }
+        .chat-input-wrapper { display: flex; gap: 10px; position: relative; align-items: center; }
+        .chat-input { flex: 1; background: rgba(20, 20, 35, 0.7); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 10px 50px 10px 18px; color: var(--text-primary); font-size: 13px; outline: none; transition: var(--transition); resize: none; /* Prevents manual resize */ overflow-y: auto; /* Allows scrolling if text wraps */ max-height: 100px; /* Limit height */ }
+        .chat-input:focus { border-color: var(--accent-color); box-shadow: 0 0 0 2px var(--accent-glow); }
+        .chat-input::placeholder { color: var(--text-secondary); }
+        .input-actions { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 5px; }
+        .input-action { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: none; border: none; color: var(--text-secondary); cursor: pointer; transition: var(--transition); }
+        .input-action:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.1); }
+        .input-action.send { background: var(--accent-color); color: white; }
+        .input-action.send:hover { background: #3a7eee; }
+        .file-upload-label { cursor: pointer; } /* Style label like a button */
+        #fileInput { display: none; } /* Hide actual file input */
+        .system-message { font-size: 11px; color: var(--text-secondary); text-align: center; margin: 10px 0; font-style: italic; }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <div class="header-title">
+                <h1>OmniAgent</h1>
+                <div class="status">
+                    <span class="status-indicator" id="statusIndicator"></span>
+                    <span id="statusText">Online</span>
+                </div>
+            </div>
+            <!-- Header action buttons (non-functional for now) -->
+            <div class="header-actions">
+                <button class="action-btn" title="Voice Input (Not Implemented)">
+                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h3a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1h3v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
+                </button>
+                <button class="action-btn" title="New Chat (Not Implemented)">
+                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/></svg>
+                </button>
+                <button class="action-btn" title="Settings (Not Implemented)">
+                     <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <!-- Messages will be added here dynamically -->
+             <div class="system-message">Agent initialized. Send a message to start.</div>
+        </div>
+
+        <div class="chat-input-container">
+            <div class="chat-input-wrapper">
+                <textarea class="chat-input" placeholder="Type your message or 'file: <path>'..." id="messageInput" rows="1"></textarea>
+                <div class="input-actions">
+                    <!-- Add file input button here if needed -->
+                    <button class="input-action send" id="sendButton" title="Send Message">
+                        <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M15.964.686a.5.5 0 0 0-.65-.65L.767 5.855H.766l-.452.18a.5.5 0 0 0-.082.887l.41.26.001.002 4.995 3.178 3.178 4.995.002.002.26.41a.5.5 0 0 0 .886-.083l6-15Zm-1.833 1.89L6.637 10.07l-.215-.338a.5.5 0 0 0-.154-.154l-.338-.215 7.494-7.494 1.178-.471-.47 1.178Z"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const messageInput = document.getElementById('messageInput');
+            const sendButton = document.getElementById('sendButton');
+            const chatMessages = document.getElementById('chatMessages');
+            const statusIndicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+
+            let eventSource = null; // To hold the EventSource connection
+            let currentBotMessageElement = null; // To append streaming content
+
+            function getCurrentTime() {
+                const now = new Date();
+                return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+
+            function addMessageToChat(text, sender) {
+                const messageElement = document.createElement('div');
+                messageElement.classList.add('message', sender); // 'sent' or 'received'
+                // Basic Markdown rendering (bold, italics, code blocks) - can be expanded
+                let formattedText = text
+                    .replace(/</g, "<").replace(/>/g, ">") // Basic HTML escaping
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Bold
+                    .replace(/\*(.*?)\*/g, '<em>$1</em>')       // Italics
+                    .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>') // Code blocks
+                    .replace(/`([^`]+)`/g, '<code>$1</code>');      // Inline code
+
+                messageElement.innerHTML = `${formattedText}<span class="message-time">${getCurrentTime()}</span>`;
+                chatMessages.appendChild(messageElement);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                return messageElement; // Return for potential streaming updates
+            }
+
+            function updateBotMessage(textChunk) {
+                 if (!currentBotMessageElement) {
+                     // Create a new message element if one doesn't exist
+                     currentBotMessageElement = addMessageToChat('', 'received');
+                     // Remove the timestamp initially, add it back when done streaming
+                     const timeElement = currentBotMessageElement.querySelector('.message-time');
+                     if(timeElement) timeElement.remove();
+                 }
+                 // Append text, basic escaping
+                 let formattedChunk = textChunk.replace(/</g, "<").replace(/>/g, ">");
+                 // Append directly, assuming no complex markdown spanning chunks
+                 currentBotMessageElement.firstChild.nodeValue += formattedChunk; // Append to text node
+                 chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+
+            function finalizeBotMessage() {
+                if (currentBotMessageElement) {
+                    // Add timestamp back
+                    const timeElement = document.createElement('span');
+                    timeElement.className = 'message-time';
+                    timeElement.textContent = getCurrentTime();
+                    currentBotMessageElement.appendChild(timeElement);
+                     // Re-apply basic markdown to the whole message if needed,
+                     // or assume it's handled by initial/chunk processing
+                     // let contentNode = currentBotMessageElement.firstChild;
+                     // let formattedText = contentNode.nodeValue
+                     //      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Simple re-apply
+                     //      .replace(/\*(.*?)\*/g, '<em>$1</em>');
+                     // currentBotMessageElement.innerHTML = `${formattedText}<span class="message-time">${getCurrentTime()}</span>`;
+
+                    currentBotMessageElement = null; // Reset for the next response
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+            }
+
+            function setStatus(statusType, message = '') {
+                statusIndicator.classList.remove('thinking', 'error');
+                switch(statusType) {
+                    case 'thinking':
+                        statusIndicator.classList.add('thinking');
+                        statusText.textContent = message || 'Thinking...';
+                        break;
+                    case 'tool':
+                        statusIndicator.classList.add('thinking'); // Keep pulsing for tools
+                        statusText.textContent = message || 'Using tool...';
+                        break;
+                    case 'error':
+                        statusIndicator.classList.add('error');
+                        statusText.textContent = 'Error';
+                         // Display error message in chat area for clarity
+                        addMessageToChat(`[Agent Error]: ${message}`, 'received system-error'); // Add a specific class if needed
+                        break;
+                    case 'online':
+                    default:
+                        statusText.textContent = 'Online';
+                        break;
+                }
+            }
+
+            function connectEventSource(payload) {
+                // Close existing connection if any
+                if (eventSource) {
+                    eventSource.close();
+                }
+
+                eventSource = new EventSource(`/chat_stream?message=${encodeURIComponent(payload.message)}&file_identifier=${encodeURIComponent(payload.file_identifier || '')}`); // Send data via query params for GET SSE
+
+                // More common: Use POST and then establish SSE connection, but requires more complex FastAPI setup
+                // For simplicity, let's use POST to initiate and then use SSE for the response stream
+                // Or adjust FastAPI endpoint to handle POST with streaming response directly
+
+                 // --- Using POST and Expecting SSE stream in response ---
+                 fetch('/chat_stream', {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify(payload)
+                 })
+                 .then(response => {
+                     if (!response.ok) {
+                         throw new Error(`HTTP error! status: ${response.status}`);
+                     }
+                     if (!response.body) {
+                          throw new Error("Streaming response body is null.");
+                     }
+                     // Process the stream
+                     const reader = response.body.getReader();
+                     const decoder = new TextDecoder();
+
+                     function processText({ done, value }) {
+                         if (done) {
+                             console.log("Stream finished.");
+                             finalizeBotMessage();
+                             setStatus('online');
+                             messageInput.disabled = false; // Re-enable input
+                             return;
+                         }
+
+                         const chunk = decoder.decode(value, { stream: true });
+                         // Process Server-Sent Events
+                         const lines = chunk.split('\n');
+                         lines.forEach(line => {
+                             if (line.startsWith('event:')) {
+                                 const eventType = line.substring(6).trim();
+                                 currentEventType = eventType; // Store event type for the data line
+                             } else if (line.startsWith('data:')) {
+                                 const data = line.substring(5).trim();
+                                 try {
+                                     const jsonData = JSON.parse(data);
+                                     handleServerEvent(currentEventType || 'message', jsonData); // Use stored type or default
+                                 } catch (e) {
+                                     // If data isn't JSON, treat as plain text content (for simple cases)
+                                     if (currentEventType === 'content' || currentEventType === 'message'){
+                                          updateBotMessage(data);
+                                     } else {
+                                          console.warn("Received non-JSON data for non-content event:", data);
+                                     }
+                                 }
+                                 currentEventType = null; // Reset event type after processing data
+                             }
+                         });
+
+                         // Continue reading the stream
+                         reader.read().then(processText).catch(handleStreamError);
+                     }
+
+                     let currentEventType = null; // To track the event type for multi-line SSE data
+                     reader.read().then(processText).catch(handleStreamError);
+
+                 })
+                 .catch(error => {
+                     console.error('Fetch Error:', error);
+                     setStatus('error', `Connection failed: ${error.message}`);
+                     finalizeBotMessage(); // Clean up any partial message
+                     messageInput.disabled = false; // Re-enable input
+                 });
+            }
+
+             function handleStreamError(error){
+                 console.error('Stream Error:', error);
+                 setStatus('error', `Stream error: ${error.message}`);
+                 finalizeBotMessage();
+                 messageInput.disabled = false; // Re-enable input
+             }
+
+            function handleServerEvent(type, data) {
+                console.log("Received SSE:", type, data); // For debugging
+                switch(type) {
+                    case 'status':
+                        setStatus('thinking', data); // Show status like Thinking, Using tool...
+                        break;
+                    case 'content':
+                        updateBotMessage(data);
+                        break;
+                    case 'tool_error':
+                        // Log or display tool-specific errors if needed, maybe less prominently
+                         addMessageToChat(`[Tool Error - ${data.tool_name || 'Unknown Tool'}]: ${data.error}`, 'received system-error');
+                        break;
+                     case 'tool_result':
+                        // Optionally display simplified tool result info
+                         addMessageToChat(`[Tool Used: ${data.tool_name || 'Unknown'}. Result preview: ${data.result_preview}]`, 'received system-info');
+                        break;
+                    case 'error':
+                        setStatus('error', data.message || data); // Show agent/server errors
+                        break;
+                    case 'message': // Default handler if no specific event type
+                         updateBotMessage(data);
+                         break;
+                    // Add more event types as needed
+                }
+            }
+
+
+            function prepareAndSendMessage() {
+                const messageText = messageInput.value.trim();
+                if (messageText === '') return;
+
+                let userMessage = messageText;
+                let fileIdentifier = null;
+
+                // Simple check for file command
+                if (messageText.toLowerCase().startsWith('file:')) {
+                     const parts = messageText.split(' ');
+                     if (parts.length > 1) {
+                          fileIdentifier = parts.slice(1).join(' ');
+                          // For now, we still require a text prompt separately if file is used
+                          // In a real UI, file upload would be separate.
+                          // Ask user for prompt regarding the file? Or assume the text *is* the prompt?
+                          // Let's assume for now the text *after* file: is the file ID,
+                          // and we need a separate prompt or just use a default like "Describe this file".
+                          // This needs better UI/UX. For now, just send it.
+                          // We'll rely on the agent logic to handle it.
+                          // Let's assume the user types "file: path/to/file.pdf" then sends,
+                          // THEN types "Summarize this". The backend needs session state for this.
+                          // ---- OR ----
+                          // We assume the user types "Summarize this: file: path/to/file.pdf"
+                          // Let's try parsing that.
+                           const fileCmd = "file:";
+                           const fileCmdIndex = messageText.toLowerCase().indexOf(fileCmd);
+                           if(fileCmdIndex !== -1) {
+                               fileIdentifier = messageText.substring(fileCmdIndex + fileCmd.length).trim();
+                               userMessage = messageText.substring(0, fileCmdIndex).trim();
+                               if (!userMessage){
+                                   // If no text before "file:", use a default prompt
+                                   userMessage = `Process the file: ${fileIdentifier}`;
+                                   addMessageToChat(`(Using default prompt for file: ${fileIdentifier})`, 'sent system-info');
+                               }
+                           }
+                     }
+                }
+
+                // Add user message to UI
+                addMessageToChat(messageText, 'sent'); // Display exactly what user typed
+
+                // Prepare payload for API
+                const formData = new FormData();
+                formData.append('message', userMessage);
+                if (fileIdentifier) {
+                    formData.append('file', fileIdentifier);
+                }
+
+                // Clear input and disable while waiting
+                messageInput.value = '';
+                messageInput.disabled = true; // Disable input during processing
+                messageInput.style.height = 'auto'; // Reset height after sending
+
+                // Set initial status
+                setStatus('thinking', 'Sending...');
+
+                // Connect to SSE endpoint
+                // connectEventSource(payload); // Replaced fetch logic below
+
+                 // --- Using POST with FormData ---
+                 fetch('/chat_stream', {
+                     method: 'POST',
+                     body: formData
+                 })
+                 .then(response => {
+                     if (!response.ok) {
+                         // Try to get error message from body
+                         return response.text().then(text => {
+                             throw new Error(`HTTP error! status: ${response.status} - ${text}`);
+                         });
+                     }
+                     if (!response.body) {
+                          throw new Error("Streaming response body is null.");
+                     }
+                     // Process the stream
+                     const reader = response.body.getReader();
+                     const decoder = new TextDecoder();
+                     currentBotMessageElement = null; // Ensure we start a new bot message
+
+                     function processText({ done, value }) {
+                         if (done) {
+                             console.log("Stream finished.");
+                             finalizeBotMessage();
+                             setStatus('online');
+                             messageInput.disabled = false;
+                             messageInput.focus();
+                             return;
+                         }
+
+                         const chunk = decoder.decode(value, { stream: true });
+                         // Process Server-Sent Events
+                         const lines = chunk.split('\n\n'); // SSE messages end with \n\n
+                         lines.forEach(lineBlock => {
+                             if (!lineBlock) return;
+                             let eventType = 'message'; // Default
+                             let eventData = '';
+                             const lineParts = lineBlock.split('\n');
+                             lineParts.forEach(line => {
+                                 if (line.startsWith('event:')) {
+                                     eventType = line.substring(6).trim();
+                                 } else if (line.startsWith('data:')) {
+                                     eventData += line.substring(5).trim(); // Accumulate multi-line data if needed, though usually single line
+                                 }
+                             });
+
+                             if (eventData) {
+                                 try {
+                                     const jsonData = JSON.parse(eventData);
+                                     handleServerEvent(eventType, jsonData);
+                                 } catch (e) {
+                                     // Treat as plain text if not JSON
+                                     if (eventType === 'content') {
+                                         updateBotMessage(eventData);
+                                     } else {
+                                          console.warn("Received non-JSON data:", eventType, eventData);
+                                          // Optionally display raw non-JSON data for other events
+                                          // addMessageToChat(`[${eventType}]: ${eventData}`, 'received system-info');
+                                     }
+                                 }
+                             }
+                         });
+                         // Continue reading
+                         reader.read().then(processText).catch(handleStreamError);
+                     }
+                     reader.read().then(processText).catch(handleStreamError);
+                 })
+                 .catch(error => {
+                     console.error('Fetch Error:', error);
+                     setStatus('error', `Connection failed: ${error.message}`);
+                     finalizeBotMessage();
+                     messageInput.disabled = false;
+                 });
+
+            }
+
+            // Event listeners for sending message
+            sendButton.addEventListener('click', prepareAndSendMessage);
+            messageInput.addEventListener('keypress', (e) => {
+                // Send on Enter, but allow Shift+Enter for newline
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault(); // Prevent default newline insertion
+                    prepareAndSendMessage();
+                }
+            });
+
+             // Auto-resize textarea
+             messageInput.addEventListener('input', () => {
+                 messageInput.style.height = 'auto'; // Reset height
+                 messageInput.style.height = (messageInput.scrollHeight) + 'px'; // Set to scroll height
+             });
+
+            // Initial focus
+            messageInput.focus();
+        });
+    </script>
+</body>
+</html>

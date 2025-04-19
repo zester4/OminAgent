@@ -7,3 +7,12 @@ sentence-transformers
 numpy
 matplotlib
 PyGithub
+hf_xet
+fastapi
+uvicorn[standard]
+python-multipart
+python-magic
+boto3
+seaborn
+plotly
+pandas
