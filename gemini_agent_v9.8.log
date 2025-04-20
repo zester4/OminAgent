@@ -1,0 +1,18 @@
+2025-04-20 18:12:41,892 - gemini_agent - INFO - --- Starting Gemini Chat Agent v9.8 (Codespaces Ready) ---
+2025-04-20 18:12:41,892 - gemini_agent - INFO - Setting up API Keys from environment...
+2025-04-20 18:12:41,892 - gemini_agent - INFO - Found required key: GEMINI_API_KEY
+2025-04-20 18:12:41,892 - gemini_agent - INFO - Found optional key: OPENWEATHERMAP_API_KEY
+2025-04-20 18:12:41,892 - gemini_agent - INFO - Found optional key: FIRECRAWL_API_KEY
+2025-04-20 18:12:41,892 - gemini_agent - INFO - Found optional key: GITHUB_API_KEY
+2025-04-20 18:12:41,892 - gemini_agent - INFO - Found optional key: STABILITY_API_KEY
+2025-04-20 18:12:41,892 - gemini_agent - INFO - Found optional key: AWS_ACCESS_KEY_ID
+2025-04-20 18:12:41,893 - gemini_agent - INFO - Found optional key: AWS_SECRET_ACCESS_KEY
+2025-04-20 18:12:41,893 - gemini_agent - INFO - API Keys configured.
+2025-04-20 18:12:41,908 - gemini_agent - INFO - Upstash Vector DB initialized successfully
+2025-04-20 18:12:41,908 - gemini_agent - INFO - Initializing tools...
+2025-04-20 18:12:41,909 - gemini_agent - INFO - Vector search tool initialized.
+2025-04-20 18:12:41,909 - gemini_agent - INFO - Tools initialized: ['get_current_weather', 'perform_web_search', 'scrape_website_for_llm', 'code_execution', 'get_current_datetime', 'github_operations', 'visualize_data', 'aws_rekognition', 'generate_image', 'semantic_memory_search']
+2025-04-20 18:12:41,909 - gemini_agent - INFO - System message generated. Approx tokens: 409
+2025-04-20 18:12:41,909 - gemini_agent - INFO - Memory init: max_tokens=1000000
+2025-04-20 18:12:41,909 - gemini_agent - INFO - 
+--- OmniBot Initialized (v9.8 - Codespaces Ready) ---

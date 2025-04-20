@@ -157,34 +157,11 @@ class VectorDB:
     def __init__(self):
         self.initialized = False
         self.index = None
-        self.cache = None
         try:
             from upstash_vector import Index
-            from upstash_redis import Redis
-            from upstash_vector import SemanticCache
-
-            # Get environment variables
-            upstash_vector_url = os.environ.get("UPSTASH_VECTOR_URL")
-            upstash_vector_token = os.environ.get("UPSTASH_VECTOR_TOKEN")
-            upstash_redis_url = os.environ.get("UPSTASH_REDIS_URL")
-            upstash_redis_token = os.environ.get("UPSTASH_REDIS_TOKEN")
-
-            if not all([upstash_vector_url, upstash_vector_token, upstash_redis_url, upstash_redis_token]):
-                logger.error("Missing Upstash configuration. Please set UPSTASH_VECTOR_URL, UPSTASH_VECTOR_TOKEN, UPSTASH_REDIS_URL, and UPSTASH_REDIS_TOKEN")
-                return
-
-            # Initialize Upstash Vector
-            self.index = Index(url=upstash_vector_url, token=upstash_vector_token)
             
-            # Initialize Redis for semantic cache
-            redis = Redis(url=upstash_redis_url, token=upstash_redis_token)
-            
-            # Initialize semantic cache with high similarity threshold
-            self.cache = SemanticCache(
-                index=self.index,
-                redis=redis,
-                min_proximity=0.95
-            )
+            # Initialize using environment variables
+            self.index = Index.from_env()
             
             self.initialized = True
             logger.info("Upstash Vector DB initialized successfully")
@@ -206,25 +183,12 @@ class VectorDB:
             import uuid
             vector_id = str(uuid.uuid4())
 
-            # Add to vector store
-            self.index.upsert(
-                vectors=[{
-                    "id": vector_id,
-                    "data": text,
-                    "metadata": metadata or {}
-                }]
-            )
-
-            # Also cache the text for semantic retrieval
-            if metadata and "type" in metadata:
-                cache_key = f"{metadata['type']}:{vector_id}"
-            else:
-                cache_key = f"memory:{vector_id}"
-            
-            try:
-                self.cache.set(cache_key, text)
-            except Exception as cache_error:
-                logger.warning(f"Cache set failed (non-critical): {cache_error}")
+            # Add to vector store with proper format for Upstash Vector
+            self.index.upsert([{
+                "id": vector_id,
+                "data": text,  # Using data field instead of values
+                "metadata": metadata or {}
+            }])
             
             logger.debug(f"Added VDB entry: {text[:50]}...")
             return True
@@ -238,18 +202,9 @@ class VectorDB:
             raise VectorDBError("VDB not initialized")
 
         try:
-            # Try cache first
-            try:
-                cache_result = self.cache.get(query)
-                if cache_result:
-                    logger.info("Cache hit!")
-                    return [{"text": cache_result, "similarity": 1.0, "metadata": {"source": "cache"}}]
-            except Exception as cache_error:
-                logger.warning(f"Cache get failed (non-critical): {cache_error}")
-
-            # If not in cache or cache failed, do vector search
+            # Perform vector search
             results = self.index.query(
-                data=query,
+                query=query,
                 top_k=top_k,
                 include_metadata=True
             )
@@ -257,7 +212,7 @@ class VectorDB:
             formatted_results = []
             for match in results:
                 formatted_results.append({
-                    "text": match.get("data", ""),
+                    "text": match.get("data", ""),  # Using data instead of values
                     "similarity": match.get("score", 0.0),
                     "metadata": match.get("metadata", {})
                 })

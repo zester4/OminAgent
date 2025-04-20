@@ -16,3 +16,5 @@ boto3
 seaborn
 plotly
 pandas
+upstash-vector>=0.3.4
+upstash-redis>=1.0.0
