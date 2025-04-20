@@ -93,7 +93,7 @@ def get_required_key(env_var):
     if not key:
         logger.error(f"CRITICAL: Environment variable {env_var} not set. Please set it in .env or system environment.")
         raise APIKeyError(f"Missing required API key: {env_var}")
-    logger.info(f"Found required key: {env_var}") # To file only
+    logger.info(f"Found required key: {env_var}") #To file only
     return key
 
 def get_optional_key(env_var):
@@ -109,6 +109,9 @@ try:
     openweathermap_api_key = get_optional_key("OPENWEATHERMAP_API_KEY")
     firecrawl_api_key = get_optional_key("FIRECRAWL_API_KEY")
     github_api_key = get_optional_key("GITHUB_API_KEY")
+    stability_api_key = get_optional_key("STABILITY_API_KEY")
+    aws_access_key = get_optional_key("AWS_ACCESS_KEY_ID")
+    aws_secret_key = get_optional_key("AWS_SECRET_ACCESS_KEY")
 except APIKeyError as e:
     print(f"Error: {e}. Please ensure it's set in your .env file or environment.", file=sys.stderr) # Console Error
     sys.exit(1)
@@ -284,11 +287,243 @@ class WebScraperTool(Tool):
             start += max_chars - overlap;
             if start >= len(content): break; start = max(0, start)
         return [c for c in chunks if c]
-class CodeExecutionTool(Tool): # Acknowledgment only version
-    def __init__(self): super().__init__(name="code_execution", description="Acknowledges Python code requests (execution by Gemini).", parameters={"type": "object", "properties": {"code": {"type": "string", "description": "Python code."}}}, required=["code"])
+class CodeExecutionTool(Tool):
+    def __init__(self):
+        super().__init__(
+            name="code_execution",
+            description="Executes Python code in a sandboxed environment with safety measures",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Execution timeout in seconds (default: 10)"
+                    }
+                },
+                "required": ["code"]
+            }
+        )
+        # Blacklisted modules for security
+        self.blacklist = {
+            'os': ['system', 'popen', 'spawn', 'exec', 'execv', 'execve', 'execvp', 'execvpe'],
+            'subprocess': ['*'],
+            'sys': ['exit'],
+            'builtins': ['exec', 'eval', '__import__'],
+            'importlib': ['import_module'],
+            'setuptools': ['*'],
+            'pip': ['*'],
+            'distutils': ['*'],
+            'socket': ['*'],
+            'sqlite3': ['*'],
+            'multiprocessing': ['*'],
+            'urllib': ['*'],
+            'http': ['*'],
+            'ftplib': ['*'],
+            'smtplib': ['*']
+        }
+        
+        # Safe module configurations
+        self.safe_modules = {
+            # Data Processing and Analysis
+            'pandas': ['DataFrame', 'Series', 'read_csv', 'read_json', 'concat', 'merge'],
+            'numpy': ['array', 'arange', 'linspace', 'zeros', 'ones', 'random', 'mean', 'median', 'std', 'min', 'max'],
+            
+            # Basic Python Utilities
+            'math': '*',
+            'random': '*',
+            'datetime': '*',
+            'json': '*',
+            'collections': '*',
+            're': '*',
+            'itertools': '*',
+            'functools': '*',
+            'statistics': '*',
+            'decimal': '*',
+            'fractions': '*',
+            'uuid': '*',
+            'hashlib': ['md5', 'sha1', 'sha256', 'sha512'],
+            
+            # Text Processing
+            'string': '*',
+            'textwrap': '*',
+            'difflib': '*',
+            
+            # Data Structures
+            'heapq': '*',
+            'bisect': '*',
+            'array': '*',
+            'enum': '*',
+            'typing': '*',
+            
+            # Serialization
+            'csv': ['reader', 'writer', 'DictReader', 'DictWriter'],
+            'base64': ['b64encode', 'b64decode'],
+            
+            # Data Visualization
+            'matplotlib.pyplot': ['plot', 'scatter', 'hist', 'bar', 'pie', 'title', 'xlabel', 'ylabel', 'show', 'savefig', 'close'],
+            'seaborn': ['scatterplot', 'lineplot', 'histplot', 'boxplot', 'heatmap']
+        }
+
+    def is_safe_import(self, node):
+        """Check if an import is safe"""
+        import ast
+        if isinstance(node, ast.Import):
+            return all(self._check_module_safety(name.name) for name in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base_module = node.module.split('.')[0] if node.module else ''
+            if base_module in self.blacklist:
+                return False
+            if base_module in self.safe_modules:
+                module_config = self.safe_modules[base_module]
+                if module_config == '*':
+                    return True
+                return all(n.name in module_config for n in node.names)
+        return True
+
+    def _check_module_safety(self, module_name):
+        """Helper to check if a module and its specific imports are safe"""
+        base_module = module_name.split('.')[0]
+        if base_module in self.blacklist:
+            return False
+        return base_module in self.safe_modules
+
+    def check_code_safety(self, code):
+        """Analyze code for potentially unsafe operations"""
+        import ast
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                # Check for blacklisted imports
+                if isinstance(node, (ast.Import, ast.ImportFrom)) and not self.is_safe_import(node):
+                    raise ToolExecutionError("Unsafe import detected")
+                
+                # Check for exec/eval calls
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name) and node.func.id in ['exec', 'eval']:
+                        raise ToolExecutionError("exec/eval calls are not allowed")
+                
+                # Check for file operations
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr in ['write', 'open', 'remove', 'unlink']:
+                        raise ToolExecutionError("File operations are restricted")
+
+            return True
+        except SyntaxError as e:
+            raise ToolExecutionError(f"Syntax error in code: {str(e)}")
+        except Exception as e:
+            raise ToolExecutionError(f"Code safety check failed: {str(e)}")
+
     def execute(self, **kwargs):
-        self.validate_args(kwargs); code = kwargs.get("code"); logger.info(f"Ack code execution: {code[:100]}...")
-        return "Code execution request acknowledged. Output will follow if executed by the AI."
+        self.validate_args(kwargs)
+        code = kwargs.get("code")
+        timeout = kwargs.get("timeout", 10)
+
+        import ast
+        import sys
+        import io
+        import contextlib
+        import signal
+        import threading
+        import traceback
+        from types import ModuleType
+
+        logger.info(f"Executing code (timeout: {timeout}s):\n{code}")
+
+        # Check code safety
+        self.check_code_safety(code)
+
+        # Prepare restricted globals
+        restricted_globals = {
+            '__builtins__': {
+                name: getattr(__builtins__, name)
+                for name in dir(__builtins__)
+                if name not in ['exec', 'eval', '__import__', 'open']
+            }
+        }
+
+        # Add safe imports
+        for module_name, allowed_items in self.safe_modules.items():
+            try:
+                module = __import__(module_name)
+                if allowed_items == '*':
+                    restricted_globals[module_name] = module
+                else:
+                    restricted_globals[module_name] = {item: getattr(module, item) for item in allowed_items}
+            except ImportError:
+                pass
+
+        # Capture output
+        output = io.StringIO()
+        error_output = io.StringIO()
+
+        # Execute with timeout
+        result = None
+        error = None
+
+        def execute_with_timeout():
+            nonlocal result, error
+            try:
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error_output):
+                    # Compile and execute in restricted environment
+                    compiled_code = compile(code, '<string>', 'exec')
+                    exec(compiled_code, restricted_globals)
+                    
+                    # If there's a value to return, it will be in locals()
+                    if '_return_value' in restricted_globals:
+                        result = restricted_globals['_return_value']
+            except Exception as e:
+                error = f"Error: {str(e)}\n{traceback.format_exc()}"
+
+        # Run in thread with timeout
+        thread = threading.Thread(target=execute_with_timeout)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout)
+
+        if thread.is_alive():
+            thread.join(0)  # Clean up the thread
+            raise ToolExecutionError(f"Code execution timed out after {timeout} seconds")
+
+        # Collect output
+        stdout_content = output.getvalue()
+        stderr_content = error_output.getvalue()
+
+        # Clean up
+        output.close()
+        error_output.close()
+
+        # Format response
+        response_parts = []
+        if stdout_content:
+            response_parts.append(f"Output:\n{stdout_content}")
+        if stderr_content:
+            response_parts.append(f"Errors:\n{stderr_content}")
+        if error:
+            response_parts.append(error)
+        if result is not None:
+            response_parts.append(f"Return value: {result}")
+
+        if not response_parts:
+            response_parts.append("Code executed successfully with no output")
+
+        # Store in vector DB if available
+        if vector_db.is_ready():
+            vector_db.add(
+                f"Code execution:\n{code}",
+                {
+                    "type": "code_execution",
+                    "code": code,
+                    "output": stdout_content,
+                    "error": stderr_content,
+                    "time": datetime.now().isoformat()
+                }
+            )
+
+        return "\n\n".join(response_parts)
 class DateTimeTool(Tool):
     def __init__(self): super().__init__( name="get_current_datetime", description="Returns current date and time.", parameters={"type": "object", "properties": {}})
     def execute(self, **kwargs): now = datetime.now(); fmt = now.strftime("%A, %d %B %Y, %H:%M:%S %Z"); return f"Current date and time: {fmt}"
@@ -369,13 +604,345 @@ class GitHubTool(Tool): # As provided
         except GithubException as e: logger.error(f"GitHub API error: {e}"); raise GitHubToolError(f"GitHub API error: {e.status} - {e.data.get('message', str(e))}")
         except Exception as e: logger.error(f"GitHub tool error: {e}", exc_info=True); raise GitHubToolError(f"Unexpected GitHub tool error: {str(e)}")
 
+class DataVisualizationTool(Tool):
+    def __init__(self):
+        super().__init__(
+            name="visualize_data",
+            description="Creates data visualizations using various plotting libraries",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "string",
+                        "description": "JSON string containing data to visualize. For arrays/lists, format as: [[x1,y1], [x2,y2], ...]"
+                    },
+                    "plot_type": {
+                        "type": "string",
+                        "enum": ["line", "scatter", "bar", "histogram", "heatmap", "box"],
+                        "description": "Type of visualization to create"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Title for the plot"
+                    },
+                    "x_label": {
+                        "type": "string",
+                        "description": "Label for x-axis"
+                    },
+                    "y_label": {
+                        "type": "string",
+                        "description": "Label for y-axis"
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Output file path (png/jpg/pdf)"
+                    }
+                },
+                "required": ["data", "plot_type", "output_file"]
+            }
+        )
+    
+    def execute(self, **kwargs):
+        self.validate_args(kwargs)
+        import json
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        try:
+            # Parse data
+            data = json.loads(kwargs.get("data"))
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                df = pd.DataFrame(data, columns=['x', 'y'])
+            elif isinstance(data, dict):
+                df = pd.DataFrame(data)
+            else:
+                raise ToolExecutionError("Invalid data format. Expected list of [x,y] pairs or dict")
+            
+            # Create plot
+            plt.figure(figsize=(10, 6))
+            plot_type = kwargs.get("plot_type")
+            
+            if plot_type == "line":
+                plt.plot(df['x'], df['y'])
+            elif plot_type == "scatter":
+                plt.scatter(df['x'], df['y'])
+            elif plot_type == "bar":
+                plt.bar(df['x'], df['y'])
+            elif plot_type == "histogram":
+                plt.hist(df['y'], bins=30)
+            elif plot_type == "heatmap":
+                pivot = df.pivot(index='x', columns='y', values='value')
+                sns.heatmap(pivot, annot=True)
+            elif plot_type == "box":
+                sns.boxplot(x='x', y='y', data=df)
+            
+            # Customize plot
+            plt.title(kwargs.get("title", ""))
+            plt.xlabel(kwargs.get("x_label", "X"))
+            plt.ylabel(kwargs.get("y_label", "Y"))
+            plt.tight_layout()
+            
+            # Save plot
+            output_file = kwargs.get("output_file")
+            plt.savefig(output_file)
+            plt.close()
+            
+            logger.info(f"Plot saved to: {output_file}")
+            return f"Visualization created and saved to {output_file}"
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Data parsing error: {e}")
+            raise ToolExecutionError(f"Invalid JSON data format: {e}")
+        except Exception as e:
+            logger.error(f"Visualization error: {e}", exc_info=True)
+            raise ToolExecutionError(f"Failed to create visualization: {e}")
+
+class AWSRekognitionTool(Tool):
+    def __init__(self):
+        super().__init__(
+            name="aws_rekognition",
+            description="Perform facial recognition and image analysis using AWS Rekognition",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["detect_faces", "compare_faces", "detect_labels", "detect_text"],
+                        "description": "Type of Rekognition operation to perform"
+                    },
+                    "source_image": {
+                        "type": "string",
+                        "description": "Path to source image file or base64-encoded image"
+                    },
+                    "target_image": {
+                        "type": "string",
+                        "description": "Path to target image for face comparison (only for compare_faces)"
+                    },
+                    "similarity_threshold": {
+                        "type": "number",
+                        "description": "Minimum similarity threshold for face comparison (0-100)"
+                    }
+                },
+                "required": ["operation", "source_image"]
+            }
+        )
+    
+    def execute(self, **kwargs):
+        self.validate_args(kwargs)
+        import boto3
+        from pathlib import Path
+        import base64
+        
+        try:
+            if not aws_access_key or not aws_secret_key:
+                raise ToolExecutionError("AWS credentials missing. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+            
+            # Initialize Rekognition client with credentials
+            rekognition = boto3.client(
+                'rekognition',
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                region_name='us-east-1'  # You can make this configurable if needed
+            )
+            
+            # Process source image
+            source_image = kwargs.get("source_image")
+            source_bytes = None
+            
+            if source_image.startswith('data:image'):
+                # Handle base64 encoded image
+                _, encoded = source_image.split(',', 1)
+                source_bytes = base64.b64decode(encoded)
+            else:
+                # Handle file path
+                with open(source_image, 'rb') as f:
+                    source_bytes = f.read()
+            
+            operation = kwargs.get("operation")
+            
+            if operation == "detect_faces":
+                response = rekognition.detect_faces(
+                    Image={'Bytes': source_bytes},
+                    Attributes=['ALL']
+                )
+                return self._format_face_detection(response)
+                
+            elif operation == "compare_faces":
+                if not kwargs.get("target_image"):
+                    raise ToolExecutionError("target_image required for face comparison")
+                    
+                target_image = kwargs.get("target_image")
+                target_bytes = None
+                
+                if target_image.startswith('data:image'):
+                    _, encoded = target_image.split(',', 1)
+                    target_bytes = base64.b64decode(encoded)
+                else:
+                    with open(target_image, 'rb') as f:
+                        target_bytes = f.read()
+                
+                response = rekognition.compare_faces(
+                    SourceImage={'Bytes': source_bytes},
+                    TargetImage={'Bytes': target_bytes},
+                    SimilarityThreshold=kwargs.get('similarity_threshold', 80)
+                )
+                return self._format_face_comparison(response)
+                
+            elif operation == "detect_labels":
+                response = rekognition.detect_labels(
+                    Image={'Bytes': source_bytes},
+                    MaxLabels=10
+                )
+                return self._format_label_detection(response)
+                
+            elif operation == "detect_text":
+                response = rekognition.detect_text(
+                    Image={'Bytes': source_bytes}
+                )
+                return self._format_text_detection(response)
+                
+        except boto3.exceptions.BotoServerError as e:
+            logger.error(f"AWS Rekognition API error: {e}")
+            raise ToolExecutionError(f"AWS Rekognition API error: {e}")
+        except Exception as e:
+            logger.error(f"Image processing error: {e}", exc_info=True)
+            raise ToolExecutionError(f"Failed to process image: {e}")
+    
+    def _format_face_detection(self, response):
+        faces = response.get('FaceDetails', [])
+        results = []
+        for face in faces:
+            results.append({
+                'confidence': face.get('Confidence'),
+                'age_range': face.get('AgeRange'),
+                'gender': face.get('Gender', {}).get('Value'),
+                'emotions': [e.get('Type') for e in face.get('Emotions', [])],
+                'pose': face.get('Pose')
+            })
+        return f"Detected {len(faces)} faces:\n" + json.dumps(results, indent=2)
+    
+    def _format_face_comparison(self, response):
+        matches = response.get('FaceMatches', [])
+        return f"Found {len(matches)} matching faces with similarities: " + \
+               ', '.join([f"{match['Similarity']:.1f}%" for match in matches])
+    
+    def _format_label_detection(self, response):
+        labels = response.get('Labels', [])
+        return "Detected labels:\n" + \
+               '\n'.join([f"- {l['Name']} ({l['Confidence']:.1f}%)" for l in labels])
+    
+    def _format_text_detection(self, response):
+        texts = response.get('TextDetections', [])
+        return "Detected text:\n" + \
+               '\n'.join([f"- {t['DetectedText']} ({t['Confidence']:.1f}%)" for t in texts])
+
+class ImageGenerationTool(Tool):
+    def __init__(self):
+        super().__init__(
+            name="generate_image",
+            description="Generate images using Stability AI's image generation API",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Text description of the image to generate"
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "description": "Name for the output file (without extension)"
+                    }
+                },
+                "required": ["prompt", "file_name"]
+            }
+        )
+    
+    def execute(self, **kwargs):
+        self.validate_args(kwargs)
+        import requests
+        from pathlib import Path
+        import os
+        
+        try:
+            prompt = kwargs.get("prompt")
+            file_name = kwargs.get("file_name")
+            output_dir = "generated_images"  # Fixed output directory
+            
+            # Create output directory if it doesn't exist
+            os.makedirs(output_dir, exist_ok=True)
+            
+            if not stability_api_key:
+                raise ToolExecutionError("Stability AI API key missing")
+            
+            logger.info(f"Generating image for prompt: {prompt}")
+            
+            # Generate image using Stability AI API
+            response = requests.post(
+                "https://api.stability.ai/v2beta/stable-image/generate/core",
+                headers={
+                    "authorization": f"Bearer {stability_api_key}",
+                    "accept": "image/*"
+                },
+                files={"none": ""},
+                data={
+                    "prompt": prompt,
+                    "output_format": "jpeg"
+                }
+            )
+            
+            if response.status_code != 200:
+                raise ToolExecutionError(f"API Error: {response.json()}")
+            
+            # Save the image
+            output_path = Path(output_dir) / f"{file_name}.jpeg"
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+            
+            logger.info(f"Image saved to: {output_path}")
+            
+            # Store in vector DB if available
+            if vector_db.is_ready():
+                vector_db.add(
+                    f"Generated image from prompt: {prompt}",
+                    {
+                        "type": "generated_image",
+                        "prompt": prompt,
+                        "file_path": str(output_path),
+                        "time": datetime.now().isoformat()
+                    }
+                )
+            
+            return f"Image generated and saved to {output_path}"
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request error: {e}")
+            raise ToolExecutionError(f"Failed to connect to Stability AI API: {e}")
+        except Exception as e:
+            logger.error(f"Image generation error: {e}", exc_info=True)
+            raise ToolExecutionError(f"Failed to generate image: {e}")
 
 # --- Initialize Tools ---
 def initialize_tools():
-    logger.info("Initializing tools..."); tools_list = [ WeatherTool(), SearchTool(), WebScraperTool(), CodeExecutionTool(), DateTimeTool(), GitHubTool() ]
-    if vector_db.is_ready(): tools_list.append(VectorSearchTool()); logger.info("Vector search tool initialized.")
-    else: logger.warning("Vector search tool NOT initialized.")
-    schemas = [t.get_schema() for t in tools_list]; tool_map = {t.name: t for t in tools_list}
+    logger.info("Initializing tools...")
+    tools_list = [
+        WeatherTool(),
+        SearchTool(),
+        WebScraperTool(),
+        CodeExecutionTool(),
+        DateTimeTool(),
+        GitHubTool(),
+        DataVisualizationTool(),
+        AWSRekognitionTool(),
+        ImageGenerationTool()
+    ]
+    if vector_db.is_ready():
+        tools_list.append(VectorSearchTool())
+        logger.info("Vector search tool initialized.")
+    else:
+        logger.warning("Vector search tool NOT initialized.")
+    schemas = [t.get_schema() for t in tools_list]
+    tool_map = {t.name: t for t in tools_list}
     logger.info(f"Tools initialized: {list(tool_map.keys())}")
     return schemas, tool_map
 active_tool_schemas, tool_map = initialize_tools()
@@ -384,7 +951,7 @@ active_tool_schemas, tool_map = initialize_tools()
 SYSTEM_MESSAGE = { 
     "role": "system", 
     "content": (
-        "You are OmniBot. Use tools proactively. **Never** say you lack access; state you will use a tool. "
+        "You are OmniAgent. Use tools proactively. **Never** say you lack access; state you will use a tool. "
         "Use `code_execution` to acknowledge Python code requests (execution handled externally). "
         "Use `github_operations` for GitHub tasks. "
         "Use `semantic_memory_search` for past info if available.\n\n"
